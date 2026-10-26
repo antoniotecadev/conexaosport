@@ -724,8 +724,8 @@ function RouteStep({ ev, set }: Omit<StepProps, "err">) {
                 <Field label="Ficheiro GPX" hint="Opcional. Upload simulado.">
                   <FileUpload
                     accept=".gpx,application/gpx+xml"
-                    value={f.gpx ? { name: f.gpx, url: "" } : null}
-                    onChange={(v) => setFile({ gpx: v?.name })}
+                    value={f.gpx ? { name: f.gpx.split("/").pop() ?? f.gpx, url: f.gpx } : null}
+                    onChange={(v) => setFile({ gpx: v?.url })}
                     label="Carregar GPX"
                   />
                 </Field>

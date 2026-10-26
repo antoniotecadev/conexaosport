@@ -47,6 +47,7 @@ export interface EventRoute {
   distanceId: string;
   description: string;
   surface: string; // ex.: "Asfalto 100%"
+  gpxUrl?: string | null;
   // Caminho estilizado (coordenadas 0–100) usado para desenhar o mapa do percurso
   path: [number, number][];
   elevation: number[]; // altitude em metros, amostras ao longo do percurso

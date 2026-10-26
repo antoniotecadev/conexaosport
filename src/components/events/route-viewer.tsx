@@ -1,10 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { Droplets, Flag, HeartPulse, MapPinned, Mountain, Utensils, Timer, Route as RouteIcon } from "lucide-react";
 import type { EventDistance, EventRoute, RoutePoint } from "@/lib/types";
 import { formatKm } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+const RouteLeafletMap = dynamic(() => import("./route-leaflet-map").then((mod) => mod.RouteLeafletMap), {
+  ssr: false,
+  loading: () => <div className="h-85 animate-pulse bg-ink-100 sm:h-105" aria-label="A carregar mapa" />,
+});
 
 const POINT_STYLE: Record<RoutePoint["type"], { label: string; Icon: React.ComponentType<{ className?: string }>; color: string; fill: string }> = {
   partida: { label: "Partida", Icon: Flag, color: "bg-emerald-100 text-emerald-700", fill: "#059669" },
@@ -20,23 +26,30 @@ function pointOnPath(path: [number, number][], fraction: number): [number, numbe
   return path[i];
 }
 
-function smooth(path: [number, number][]) {
-  if (path.length < 2) return "";
-  let d = `M ${path[0][0]} ${path[0][1]}`;
-  for (let i = 1; i < path.length; i++) {
-    const [x0, y0] = path[i - 1];
-    const [x1, y1] = path[i];
-    const mx = (x0 + x1) / 2;
-    const my = (y0 + y1) / 2;
-    d += ` Q ${x0} ${y0} ${mx} ${my}`;
-  }
-  const last = path[path.length - 1];
-  return `${d} T ${last[0]} ${last[1]}`;
+type GpxPoint = { lat: number; lon: number; ele?: number };
+
+function readGpx(xml: string): GpxPoint[] {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("GPX inválido");
+  const points = [...doc.getElementsByTagName("*")].filter((el) => el.localName === "trkpt" || el.localName === "rtept").flatMap((el) => {
+    const rawLat = el.getAttribute("lat");
+    const rawLon = el.getAttribute("lon");
+    if (rawLat == null || rawLon == null) return [];
+    const lat = Number(rawLat);
+    const lon = Number(rawLon);
+    const rawElevation = [...el.getElementsByTagName("*")].find((child) => child.localName === "ele")?.textContent;
+    const ele = rawElevation == null ? undefined : Number(rawElevation);
+    return Number.isFinite(lat) && Number.isFinite(lon)
+      ? [{ lat, lon, ...(ele !== undefined && Number.isFinite(ele) ? { ele } : {}) }]
+      : [];
+  });
+  if (points.length < 2) throw new Error("GPX sem pontos de percurso suficientes");
+  return points;
 }
 
 function ElevationChart({ data, km }: { data: number[]; km: number }) {
-  const min = Math.min(...data);
-  const max = Math.max(...data);
+  const min = data.reduce((a, b) => Math.min(a, b), Infinity);
+  const max = data.reduce((a, b) => Math.max(a, b), -Infinity);
   const range = Math.max(10, max - min);
   const w = 600;
   const h = 140;
@@ -69,9 +82,37 @@ function ElevationChart({ data, km }: { data: number[]; km: number }) {
 export function RouteViewer({ routes, distances }: { routes: EventRoute[]; distances: EventDistance[] }) {
   const [id, setId] = useState(routes[0]?.distanceId);
   const route = routes.find((r) => r.distanceId === id) ?? routes[0];
+  const [gpxPoints, setGpxPoints] = useState<{ url: string; points: GpxPoint[] } | null>(null);
+  useEffect(() => {
+    const url = route?.gpxUrl;
+    if (!url) {
+      setGpxPoints(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(url, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error("Não foi possível carregar o GPX");
+        return response.text();
+      })
+      .then((xml) => setGpxPoints({ url, points: readGpx(xml) }))
+      .catch(() => {
+        if (!controller.signal.aborted) setGpxPoints(null);
+      });
+    return () => controller.abort();
+  }, [route?.gpxUrl]);
   const dist = distances.find((d) => d.id === route?.distanceId);
   if (!route || !dist) return null;
-  const d = smooth(route.path);
+  const track = gpxPoints?.url === route.gpxUrl ? gpxPoints?.points ?? null : null;
+  const positions = track?.map((p) => [p.lat, p.lon] as [number, number]) ?? [];
+  const path = route.path;
+  const fallbackPath = path.map(([x, y], i) => `${i ? "L" : "M"} ${x} ${y}`).join(" ");
+  const markers = track ? route.points.map((p) => {
+    const point = track[Math.min(track.length - 1, Math.max(0, Math.round((p.km / dist.distanceKm) * (track.length - 1))))];
+    return { position: [point.lat, point.lon] as [number, number], label: p.name, color: POINT_STYLE[p.type].fill };
+  }) : [];
+  const elevation = track?.filter((p) => p.ele !== undefined).map((p) => p.ele!) ?? [];
+  const chartData = elevation.length > 1 ? elevation : route.elevation;
   const types = [...new Set(route.points.map((p) => p.type))];
 
   return (
@@ -91,7 +132,9 @@ export function RouteViewer({ routes, distances }: { routes: EventRoute[]; dista
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.4fr_1fr]">
         <div className="overflow-hidden rounded-2xl border border-ink-200/70 bg-[#eef4ea]">
-          <svg viewBox="0 0 100 100" className="aspect-[4/3] w-full" role="img" aria-label={`Mapa do percurso ${dist.name}`}>
+          {track ? (
+            <RouteLeafletMap positions={positions} markers={markers} title={dist.name} />
+          ) : <svg viewBox="0 0 100 100" className="aspect-4/3 w-full" role="img" aria-label={`Mapa do percurso ${dist.name}`}>
             <defs>
               <pattern id="grid" width="10" height="10" patternUnits="userSpaceOnUse">
                 <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#d7e3d0" strokeWidth="0.3" />
@@ -99,28 +142,27 @@ export function RouteViewer({ routes, distances }: { routes: EventRoute[]; dista
             </defs>
             <rect width="100" height="100" fill="url(#grid)" />
             <path d="M -5 92 C 20 82, 40 98, 60 88 S 95 80, 105 86 L 105 105 L -5 105 Z" fill="#bfdbfe" opacity="0.8" />
-            <path d={d} fill="none" stroke="white" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" />
-            <path d={d} fill="none" stroke="#e23d0b" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            <path d={fallbackPath} fill="none" stroke="white" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" />
+            <path d={fallbackPath} fill="none" stroke="#e23d0b" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
             {route.points.map((p, i) => {
-              const [x, y] = pointOnPath(route.path, p.km / dist.distanceKm);
+              const [x, y] = pointOnPath(path, p.km / dist.distanceKm);
               const s = POINT_STYLE[p.type];
               const big = p.type === "partida" || p.type === "chegada";
-              if (p.type === "chegada" && route.path[0][0] === route.path[route.path.length - 1][0]) return null;
               return (
                 <g key={i}>
                   <circle cx={x} cy={y} r={big ? 3 : 1.7} fill={s.fill} stroke="white" strokeWidth="0.7" />
-                  {big && <text x={x + 4} y={y + 1.2} fontSize="3.4" fontWeight="700" fill="#0e1a33">{p.type === "partida" && route.path[0][0] === route.path[route.path.length - 1][0] ? "Partida / Chegada" : s.label}</text>}
+                  {big && <text x={x + 4} y={y + 1.2} fontSize="3.4" fontWeight="700" fill="#0e1a33">{s.label}</text>}
                 </g>
               );
             })}
-          </svg>
-          <div className="flex flex-wrap gap-x-4 gap-y-1.5 border-t border-ink-200/70 bg-white px-4 py-3 text-xs font-semibold text-ink-600">
+          </svg>}
+          {!track && <div className="flex flex-wrap gap-x-4 gap-y-1.5 border-t border-ink-200/70 bg-white px-4 py-3 text-xs font-semibold text-ink-600">
             {types.map((t) => (
               <span key={t} className="inline-flex items-center gap-1.5">
                 <span className="size-2.5 rounded-full" style={{ background: POINT_STYLE[t].fill }} /> {POINT_STYLE[t].label}
               </span>
             ))}
-          </div>
+          </div>}
         </div>
 
         <div className="space-y-4">
@@ -138,7 +180,7 @@ export function RouteViewer({ routes, distances }: { routes: EventRoute[]; dista
             ))}
           </dl>
           <p className="text-[15px] text-ink-700"><strong>Piso:</strong> {route.surface}. {route.description}</p>
-          <ElevationChart data={route.elevation} km={dist.distanceKm} />
+          {chartData.length > 1 && <ElevationChart data={chartData} km={dist.distanceKm} />}
         </div>
       </div>
 

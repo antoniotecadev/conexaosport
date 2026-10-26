@@ -139,6 +139,7 @@ export function mapEvent(row: EventListRow | EventDetailRow, today: string, opts
                 distanceId: d.code,
                 description: d.route.description,
                 surface: d.route.surface,
+                gpxUrl: d.route.gpxUrl,
                 path: d.route.path as [number, number][],
                 elevation: d.route.elevation as number[],
                 points: d.route.points.map((p) => ({ km: Number(p.km), name: p.name, type: p.type })),
